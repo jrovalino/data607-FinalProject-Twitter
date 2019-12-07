@@ -1,0 +1,839 @@
+---
+title: "Twitter Sentiment Analysis"
+author: "Sie Siong Wong - Joe Rovalino - Anil Akyildirim"
+date: "11/8/2019"
+output:
+  html_document:
+    toc: yes
+    toc_collapsed: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+theme: lumen
+---
+
+# Load R Packages
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+# Load Requried Packages
+library(tm)
+library(lda)
+library(httr)
+library(dplyr)
+library(tidyr)
+library(anytime)
+library(stringi)
+library(twitteR)
+library(syuzhet)
+library(tidytext)
+library(tidyverse)
+library(SnowballC)
+library(wordcloud)
+library(topicmodels)
+library(BiocManager)
+
+# Package required for running Twitter API authorization and other R packages.
+installed.packages('base64enc')
+# BiocManager::install("Rgraphviz") *** Note that you'll need to install this "Rgraphviz" package in this way in order to run code line 306.
+
+```
+
+# Introduction
+
+Donald Trump changed the communication platform of politics from burocratic aproaches of scheduled and managed political speeches to direct communication via Twitter. He started using twitter heavily on his 2016 persidential campaign and has not looked back since. His tweets has been analyzed by variety of researchers from frequency of "angry" tweets, his emotional state during the times of his tweets, the type of tweets he sends with specific mobile devices to his tweets impact on financial markets. In this study, the main business question we are trying solve is **"Can we leverage President Trump’s trade or interest rate related tweets and predict the market?"** We review the tweets between January 2018 to present, classify his tweets based on their topics and context related to trade wars, interest rate, employment in the US and conusmer spending , create a model and perform sentiment analysis. 
+
+Overall the main goal of this study is to see the classified tweets of Donald Trump, discover possible relationship with the stock market and to see how the context of text used on his account impacts the stock market. In order to do this, we will identify and describe common topics and use of text that can change the market in the corpus of the tweets that is sent from the @realDonaldTrump twitter account. We can further compare the stock market data against these tweets to see if there is any correlation and if we can create a topic model and sentiment analysis that can predict the stock market.
+
+
+# Data Collection
+
+Based on the business problem in question, the content of the required data is Tweets and Stock Market Data. They are available via Twitter and Financial news platforms.
+
+## Donald Trump's Tweets
+
+Twitter's developer account provides many API procducts including tools to extract tweets and their metadata. We will use this API to extract the wtitter data in a structured format to further wrangling and analysis. In order to use the twitter API we created a twitter account and requested developer API access. Once we received an approval, we have been provided API key and Token access information. We will be using these keys, tokens to access the API and "twitterR" to extract Donald Trump's tweets. 
+
+## Connect to Twitter through API
+
+```{r, eval=TRUE}
+
+# Authorization keys.
+app_name <- "JAS"
+consumer_key <- 'sPwbbZCtf8nfSMxhYTzqI8WHJ'
+consumer_secret <- 'KfcOxgElcQ70fi3QNy8LkuDAN18dunXT147MoA8aBOLzpr3Vd3'
+access_token <- '600477513-rdd3Fcywq1sfnh5S60egRQxXh0TlDqfrLzyZo4Vk'
+access_secret <- 'SdDFCJUOoqAwt671VXeLaD781TdUYdeBSW2gyQMG4P5Zh'
+
+# Extract some tweets from Twitter.
+setup_twitter_oauth(consumer_key, consumer_secret, access_token, access_secret)
+tweets <- userTimeline("realDonaldTrump", n=5)
+tweets
+
+```
+
+Upon extracting tweeter data via Twitter API and converting to dataframe, we notice that there is a limitation on the number of tweets (3200) we can extract using twitter API. This is due to our account being "Free Developer Account" and in order us to increase the tweet account, we are required to upgrade our account. Since this might become problematic and can put a damper on our analysis and future model, we think it will be better to use a service called http://www.trumptwitterarchive.com/archive that archives all Donald Trump's tweets. 
+
+## Load Data
+
+```{r, eval=TRUE}
+
+# President Trump tweets from 01/01/2018 to 11/21/2019.
+tweets_raw <- read.csv("https://raw.githubusercontent.com/SieSiongWong/Twitter/dev/trumptweets.csv")
+
+# S&P stock price data from year 01/04/2016 o 11/22/2019.
+stocks_raw <- read.csv("https://raw.githubusercontent.com/SieSiongWong/Twitter/dev/sandp.csv")
+
+head(tweets_raw)
+head(stocks_raw)
+
+```
+
+Description of the variables in our Twitter data set is as follows;
+
+* text: Content of the tweet.
+
+* created: Date and time the tweet is created.
+
+* Retweet: The count of retweet of the tweet.
+
+* Favorite: The count of favorited of the tweet.
+
+Description of the variables in our Stock Markget data set is as folows;
+
+* Date: The date of the stock market.
+
+* Open: The stock opening price during the trading date.
+
+* High: The stock highest price during the trading date.
+
+* Low: The stock lowest price during the trading date.
+
+* Close: The stock closing price during the trading date.
+
+* Adj. Close: The adjusted stock closing price during the trading date.
+
+* Volume: The trading volume of stcok during the trading date.
+
+
+# Data Cleaning and Preparation
+
+In this phase of the study, we will construct and clean both Stock Market and Tweets Data Set. The cleaning phase will include, updating the date class, filtering the dataset based on our analysis goal, transforming values such as percentage change in stock value, removing unwanted characters from text and selecting only the columns we need. We will further tokenize the text within tweets data set to see the word frequency and create Document Term Matrix as part of pre-processing.
+
+## Stock Data Cleaning
+
+```{r, eval}
+
+# Update Date column into date format.
+stocks_raw$Date <- as.Date(stocks_raw$Date)
+
+# Select data from 01/01/2018 to 11/20/2019 and calculate price change percentage between closing and opening price.
+stocks.df <- stocks_raw %>% 
+  filter(between(Date, as.Date("2018-01-01"),as.Date("2019-11-20"))) %>%
+  mutate(Pct_Change=(Close-Open)/Open*100)
+
+head(stocks.df)
+
+```
+
+## Tweets Data Cleaning
+
+```{r, eval=TRUE}
+
+# Extract columns from trumptweets.csv file that are useful for analysis.
+tweets_slc <- tweets_raw %>% select(source, text, created_at) 
+
+# Remove source other than iphone.
+tweets_slc <- tweets_slc %>% filter(source=="Twitter for iPhone")
+
+# Drop source column.
+tweets_slc <- tweets_slc %>% select(text, created_at)
+
+# Separate column "created_at" into "date" and "hour".
+tweets_slc <- separate(data = tweets_slc, col = created_at, into  = c('date', 'hour'), sep = ' ') %>% select(text, date, hour)
+
+# Remove minutes in hour column.
+tweets_slc$hour <- gsub("\\:+\\w*","", tweets_slc$hour)
+
+# Remove meaningless characters and symbols.
+tweets_slc$text <- gsub("&amp","", tweets_slc$text)
+tweets_slc$text <- gsub("(RT)((?:\\b\\w*@\\w+)+)","", tweets_slc$text)
+tweets_slc$text <- gsub("^RT","", tweets_slc$text)
+tweets_slc$text <- gsub("@\\w+","", tweets_slc$text)
+tweets_slc$text <- gsub("[[:punct:]]","", tweets_slc$text)
+tweets_slc$text <- gsub("[[:digit:]]+\\s","", tweets_slc$text)
+tweets_slc$text <- gsub("http\\w+","", tweets_slc$text)
+tweets_slc$text <- gsub("[ \t]{2,}"," ", tweets_slc$text)
+
+# Remove all non-ASCII characters 
+tweets_slc$text <- iconv(tweets_slc$text, "UTF-8", "ASCII", sub="")
+
+# Delete empty text column.
+tweets_slc <- tweets_slc %>% na_if("") %>% na_if(" ") %>% na.omit()
+
+# Tweets that contained less than 20 characters were treated as noise.
+tweets_slc <- tweets_slc %>% filter(nchar(text)>20)
+
+# Add id column to consider each text row as a document.
+tweets_slc$doc_id <- seq.int(nrow(tweets_slc))
+
+head(tweets_slc)
+
+```
+
+## Tokenizing Text and Word Frequency
+
+```{r, eval=TRUE}
+
+# Tokenize the text and see frequency of words.
+tweets_slc %>% 
+  unnest_tokens(word, text)%>%
+  anti_join(stop_words) %>%
+  count(word, sort=TRUE) 
+
+# We can see that words such as "president, trump" not pertaining to trade, so we remove them.
+tweets_slc <- tweets_slc %>% mutate(text=tolower(text))
+tweets_slc$text <- gsub("president?","", tweets_slc$text)
+tweets_slc$text <- gsub("trump?","", tweets_slc$text)
+
+# Retokenize the text and check to see if words being removed.
+tweets_slc %>% 
+  unnest_tokens(word, text)%>%
+  anti_join(stop_words) %>%
+  count(word, sort=TRUE)
+
+# Creating tweets frequency dataframe.
+top_words <- tweets_slc %>% 
+  unnest_tokens(word, text)%>%
+  anti_join(stop_words) %>%
+  count(word, sort=TRUE)
+
+# Visualizing words which frequency are greater than 300.
+top_words <- filter(top_words, n>300)
+head(top_words)
+
+```
+
+## Creating Document Term Matrix
+
+```{r, eval=TRUE}
+
+# Select text and id column.
+tweetscorpus.df <- tweets_slc %>% select(doc_id, text)
+
+# Create a corpus for document term matrix.
+tweetscorpus <- VCorpus(DataframeSource(tweetscorpus.df))
+
+# Remove all punctuation from the corpus.
+tweetscorpus <- tm_map(tweetscorpus, removePunctuation)
+
+# Remove all English stopwords from the corpus.
+tweetscorpus <- tm_map(tweetscorpus, removeWords, stopwords("en"))
+tweetscorpus <- tm_map(tweetscorpus, removeWords, stopwords("SMART"))
+
+# Remove all number from the corpus.
+tweetscorpus <- tm_map(tweetscorpus, removeNumbers)
+
+# Strip extra white spaces in the corpus.
+tweetscorpus <- tm_map(tweetscorpus, stripWhitespace)
+
+# Stem words in the corpus.
+tweetscorpus <- tm_map(tweetscorpus, stemDocument)
+
+# Build a document term matrix.
+tweetsdtm <- DocumentTermMatrix(tweetscorpus)
+
+# Remove sparse terms which don't appear very often. Limit the document term matrix to contain terms appearing in at least 2% of documents.
+tweetsdtm <- removeSparseTerms(tweetsdtm, 0.98)
+
+# Find the sum of words in each document and remove all docs without words.
+rowTotals <- apply(tweetsdtm , 1, sum)
+tweetsdtm.new   <- tweetsdtm[rowTotals> 0, ]
+
+# Put the document in the format lda package required.
+tweetsdtm.matrix <- as.matrix(tweetsdtm.new)
+
+head(tweetsdtm.matrix, n=5)
+
+```
+
+# Data Exploration 
+
+In order to define our analytical approach we would like to understand the data gained, review initial insights about our data and make sure we do not require additional data in order to find the answer of our problem in question. 
+
+We can initially take a look at the top words within the tweets.
+
+```{r, eval=TRUE}
+
+# Visualization of top words within the complete tweets data.
+theme_set(theme_classic())
+
+ggplot(top_words, aes(x=word, y=n))+
+  geom_bar(stat="identity", width = 0.5, fill="tomato2")+
+  xlab("Terms") + ylab("Count") + coord_flip() +
+  theme(axis.text.x = element_text(angle=65, vjust=0.6, size=7))
+
+```
+
+```{r, eval=TRUE}
+
+# Visualizing wordcloud.
+wordcloud(tweetscorpus, max.words = 100, random.order = FALSE, rot.per = 0.15, min.freq = 5, colors = brewer.pal(8, "Dark2"))
+
+```
+
+There are some interesting finds here such as the top two words used within the tweets are "people" and "democrats". Great is another word that is commonly used. However none of this top words analysis is very helpful to reach our business objective as they are not related to "Trade". 
+To be more specific, we can take a look at words individually and review their relationship between them. 
+
+```{r, eval=TRUE}
+
+# Which words are associated with 'trade'?
+findAssocs(tweetsdtm.new, "trade", 0.05)
+
+# Which words are associated with 'china'?
+findAssocs(tweetsdtm.new, "china", 0.05)
+
+# Which words are associated with 'job'?
+findAssocs(tweetsdtm.new, "job", 0.05)
+
+```
+
+We can see "trade" has associations with multiple words such as deal, billion and china and text "job" has associations with great,  militari and economi. 
+
+```{r, eval=TRUE}
+
+freq_terms <- findFreqTerms(tweetsdtm.new, lowfreq = 500)  
+
+# Visualizing the association.
+plot(tweetsdtm.new, term = freq_terms, corThreshold = 0.10, weighting = T)
+
+```
+
+We can also see the association between words such as "news" and "fake", "great", "jobs" and "state" are commonly used together. 
+
+We should also look at how stock market has been trending within our target date range.
+
+```{r}
+
+ggplot(stocks.df, aes(x=Date))+
+  geom_line(aes(y=Open))+
+  labs(title = "Stock Market Trend")+
+  theme(axis.text.x = element_text(angle=90, vjust=0.5),
+        panel.grid.minor = element_blank())
+
+```
+
+We can see that starting from 2019-01, the stock market is trending upwards. 
+
+
+# Model Development
+
+Based on our business objective and the data we have prepared, we decided to proceed with topic modeling as our analytical approach for model development. The idea is for us to identify topics as set of documents, select the right topic and create a final stock market dataframe for prediction. In terms of topic modeling, we have selected Latent Dirichlet Allocation (LDA).
+
+## LDA Model
+
+LDA is an unsupervised learning that views the documents as bag of words. In each topic that is generated, picks a set of words against it. Below outlines the each step the LDA does;
+
+* Assume there are k topics across all the documents.
+
+* Distribute these topics across a dopcument by assigning each word a topic.
+
+* For each word in the document, assume its topic is wrong but every other word is assigned the topic is correct.
+
+* Assign a word for each topic based on what topics are in the document and how many times a word has been assigned to a particular topic accross all of the documents. 
+
+* Repeat this process a number of times for each document. 
+
+### Topics Modeling
+
+After running the LDA model few times, we found that using 30 topics will produce better result of topic classifying. 
+
+```{r, eval=TRUE}
+
+# Create a LDA model with Gibbs method for 30 topics.
+tweetsLDA <- LDA(tweetsdtm.matrix, 30, method="Gibbs", control = list(seed = 123))
+
+# Top 30 words per topic.
+terms(tweetsLDA, 30)
+
+```
+
+### Per-Document Classification
+
+```{r, eval=TRUE}
+
+# Per-topic-per-word probabilities.
+tweetsLDA.topicword.prob <- tidy(tweetsLDA, matrix="beta")
+head(tweetsLDA.topicword.prob)
+
+# Find the 10 terms that are most common within each topic.
+tweetsLDA.topterms <- tweetsLDA.topicword.prob %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+head(tweetsLDA.topterms)
+
+# Plot per-topic-per-word probabilities for topic #26.
+tweetsLDA.topterms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  filter(topic==26) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+
+# Classify the selected topic #26 per document.
+tweetsLDA.class <- data.frame(topics(tweetsLDA))
+tweetsLDA.class <- cbind(tweetsLDA.class, 1:nrow(tweetsLDA.class))
+colnames(tweetsLDA.class)[ncol(tweetsLDA.class)] <-'doc_id'
+tweetsLDA.class <- tweetsLDA.class %>% filter(topics.tweetsLDA.==26)
+
+head(tweetsLDA.class)
+
+# Inner join selected classified topic with original dataframe.
+tweets.final <- inner_join(tweetsLDA.class, tweets_slc)
+head(tweets.final)
+
+```
+
+Based on the probability per topic, per word , we can see that "china", "trade", "dollar", "billion" and "deal" has the highest probability in the topic #26 we chose. These words we consider have highly relevant to the trade topic we're focusing on. Therefore, we're able to reduce the cleaned original 9,171 tweets to 253 tweets. We'll use these 253 identified trade-related tweets for sentiment analysis.
+
+# Sentiment Analysis
+
+In the sentiment analysis, each tweets will get an emotion score. The 'Syuzhet’ package breaks the emotion into 10 different emotions: anger, anticipation, disgust, fear, joy, sadness, surprise, trust, negative and positive. Each tweet will be evaluated by these 10 emotions and then assigned a sum score.
+
+```{r, eval=TRUE}
+
+# Turn tweets text into vector.
+tweets.df <- as.vector(tweets.final$text)
+
+# Getting emotion score for each tweet.
+tweets.emotion <- get_nrc_sentiment(tweets.df)
+tweets.emotion <- cbind(tweets.final, tweets.emotion) 
+head(tweets.emotion)
+
+# Getting sentiment score for each tweet.
+tweets.score <- get_sentiment(tweets.df)
+tweets.score <- cbind(tweets.final,tweets.score )
+head(tweets.score)
+
+```
+
+We have defined the topics in sets of documents using LDA topics modeling, we have also assigned a tweet score with our sentiment analysis. Our next step is to map the sentiment scores against the stock price change. 
+
+## Sentiment Scores vs Stock Price Change
+
+In order to map the sentiment scores, we first group the date and sum the sentiment scores into single day and then merge with stocks dataframe. 
+
+````{r, eval=TRUE}
+
+# Update column name.
+colnames(tweets.score)[4]<-"Date"
+
+# Aggregate scores into single day.
+tweets.score.sum <- tweets.score %>% 
+  select(Date, tweets.score) %>% 
+  group_by(Date) %>%
+  summarise(scores=sum(tweets.score))
+
+# Update date column into date format.
+tweets.score.sum$Date <- anydate(tweets.score.sum$Date)
+  
+# Merge stocks dataframe and scores dataframe.
+stocks.df.new <-  stocks.df %>% select(Date, Pct_Change)
+stocks.scores <- merge(stocks.df.new,tweets.score.sum, by='Date')
+
+head(stocks.scores)
+
+```
+
+When we look at our combined stocks and scores dataframe, we are able to see the percentage change of stock market for a given date and its sentiment score.
+
+# Visualization
+
+```{r, eval=TRUE}
+
+## Compare stocks price percentage change with sentiment score.
+
+# Two variables on same y-axis.
+ggplot(stocks.scores, aes(Date)) + ggtitle("Stocks Price Change vs Sentiment Scores") + ylab("") +  geom_line(aes(y=Pct_Change, group=1, colour="Stock Price Change")) + geom_line(aes(y=scores, group=2, colour="Sentiment Scores")) + theme(plot.title = element_text(hjust=0.5), axis.title.x=element_blank(), axis.text.x=element_text(angle=90,hjust=1), legend.position=c(0.5,0.9),legend.title=element_blank())
+
+# Each variable on different y-axis with geom_line.
+ggplot(stocks.scores,aes(x=Date)) +  geom_line(aes(y=scores, colour="Sentiment Scores")) + geom_line(aes(y=Pct_Change*10, colour="Stock Price Change")) + scale_y_continuous(sec.axis = sec_axis(~ ./100 , name = "%")) + scale_colour_manual(values=c("blue","red")) + labs(y="Scores", x="Date", colour="Parameter") + theme(legend.position=c(0.87,0.885))
+
+# Each variable on different y-axis with geom_line and geom_smooth.
+ggplot(stocks.scores,aes(x=Date)) +  geom_line(aes(y=scores, colour="Sentiment Scores")) + geom_smooth(aes(y=Pct_Change*10, colour="Stock Price Change")) + scale_y_continuous(sec.axis = sec_axis(~ ./100 , name = "%")) + scale_colour_manual(values=c("blue","red")) + labs(y="Scores", x="Date", colour="Parameter") + theme(legend.position=c(0.87,0.885))
+
+## Linear Regression
+
+# Checking to see if there is meaningful linear relationship between sentiment scores and stock price change.
+stocks.scores.lm <- lm(Pct_Change~scores, data=stocks.scores)
+summary(stocks.scores.lm)
+plot(x = stocks.scores$scores, y = stocks.scores$Pct_Change)
+abline(stocks.scores.lm)
+
+```
+
+
+# Conclusion
+
+* Top 5 words that are used with the topic that has the most impact on stock market price change are, "china", "trade", "dollar", "billion" and "deal"
+
+* When "trade" word is used in a tweet, it is common that words "such as deal", "billion" , "china", "countri", "dollar", "year", "unit", "talk", "good", "usa", "long" and "meet" are used as well.
+
+* Even though the linear regression result where p-value is greater than the significant level of 0.05 and R-squared value is approximately zero suggests that there is no meaningful relationship between stock price change and sentiment scores, but we do see there are patterns of stock price change and sentiment scores moving in the same direction in visualization section.
+
+* Overall, we have achieved what are trying to do be able to clean up the raw tweets, classify tweets into topics, sentimentalize tweets, and finally correlate the sentiment scores with stock price change to see if both have a strong relationship. Certainly, there are something we can do better to improve the relationship between sentiment scores and stock price change such as considering tweets after 4pm when stock market close into next day sentiment analysis. This way sentiment scores trend will match better to the stock price change.
+
+
+# Appendix
+
+In this section, we included additional approaches we have executed along the way. You might consider these as different iterations of the project/output.
+
+
+ITERATION 2
+
+```{r, eval=FALSE, echo=FALSE}
+
+installed.packages('base64enc')
+installed.packages('NLP')
+installed.packages("textmineR")
+installed.packages("anytime")
+installed.packages("BiocManager")
+installed.packages("topicmodels")
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+# Load Requried Packages
+library("base64enc")
+library("SnowballC")
+library("tm")
+library("twitteR")
+library("syuzhet")
+library("dplyr")
+library("tidyr")
+library("tidytext")
+library("textmineR")
+library(purrr)
+library(ggplot2)
+library(readr)
+library(textdata)
+library(stringr)
+library(lubridate)
+library(hunspell)
+library(lubridate)
+library(anytime)
+library(wordcloud)
+library(BiocManager)
+library(Rgraphviz)
+library(topicmodels)
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+consumer_key <- 'sPwbbZCtf8nfSMxhYTzqI8WHJ'
+consumer_secret <- 'KfcOxgElcQ70fi3QNy8LkuDAN18dunXT147MoA8aBOLzpr3Vd3'
+access_token <- '600477513-rdd3Fcywq1sfnh5S60egRQxXh0TlDqfrLzyZo4Vk'
+access_secret <- 'SdDFCJUOoqAwt671VXeLaD781TdUYdeBSW2gyQMG4P5Zh'
+
+setup_twitter_oauth(consumer_key, consumer_secret, access_token, access_secret)
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+trump_tweets <- userTimeline("realDonaldTrump", n=3200)
+trump_tweets_df <- tbl_df(map_df(trump_tweets, as.data.frame))
+head(trump_tweets_df)
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+tweets_raw <- read.csv("trumptweets.csv", header = TRUE)
+tweets <- tweets_raw %>%
+  select(text, created_at, retweet_count, favorite_count) %>%
+  rename(
+    created=created_at,
+    retweet=retweet_count,
+    favorite=favorite_count
+  )
+
+tweets
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+stock_raw <- read.csv("sandp.csv", header=TRUE)
+head(stock_raw)
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+na_count_tweets <- sapply(tweets, function(y) sum(length(which(is.na(y)))))
+na_count_tweets <- data.frame(na_count_tweets)
+na_count_stocks <- sapply(stock_raw, function(y) sum(length(which(is.na(y)))))
+na_count_stocks <- data.frame(na_count_stocks)
+na_count_tweets
+na_count_stocks
+
+
+```
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+tweets <- na.omit(tweets)
+str(tweets)
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+tweets$created <- mdy_hm(tweets$created)
+tweets$created <- as.Date(tweets$created)
+tweets
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+tweets_year <- filter(tweets, created >= as.Date("2018-11-25") & created <= as.Date("2019-11-25"))
+tweets_year
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+# in this one we need to add additional stop words to remove
+
+tweet_corpus <- Corpus(VectorSource(tweets_year$text)) # building a corpus
+removeURL <- function(x) gsub("http[^[:space:]]*", "", x) # to remove the urls
+removeNumPunct <- function(x) gsub("[^[:alpha:][:space:]]*", "", x)
+
+tweet_corpus <- tweet_corpus %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeWords, c("amp", "realdonaldtrump", "rt", "will", stopwords("english"))) %>%
+  tm_map(stripWhitespace)
+  
+tweet_corpus <- tm_map(tweet_corpus, content_transformer(removeURL)) # remove urls
+tweet_corpus <- tm_map(tweet_corpus, content_transformer(removeNumPunct))
+tweet_corpus_copy <- tweet_corpus # keep a copy for future stem completion 
+tweet_corpus <- tm_map(tweet_corpus, stemDocument)
+tweet_corpus[[1]]
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+tweet_corpus[1:5]
+for (i in 1:20) {
+    cat(paste("[[", i, "]] ", sep = ""))
+    writeLines(as.character(tweet_corpus[[i]]))
+}
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+tdm <- TermDocumentMatrix(tweet_corpus,
+                          control = list(wordLengths = c(1, Inf)))
+tdm
+
+```
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+# Frequency of Words and their association
+idx <- which(dimnames(tdm)$Terms %in% c("trade", "interest", "war", "fed", "eu"))
+as.matrix(tdm[idx, (1:50)])
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+# frequent words
+freq_terms <- findFreqTerms(tdm, lowfreq = 50)
+freq_terms[0:10]
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+term_freq <- rowSums(as.matrix(tdm))
+term_freq <- subset(term_freq, term_freq >= 20) # at least 20 times
+df <- data.frame(term = names(term_freq), freq = term_freq)
+highest_df <- df[order(-df$freq), ]
+top_20 <- top_n(highest_df, 20)
+top_20
+
+```
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+theme_set(theme_classic())
+
+
+ggplot(top_20, aes(x=term, y=freq))+
+  geom_bar(stat="identity", width = 0.5, fill="tomato2")+
+  xlab("Terms") + ylab("Count") + coord_flip() +
+  theme(axis.text.x = element_text(angle=65, vjust=0.6, size=7))
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+wordcloud(tweet_corpus, max.words = 100, random.order = FALSE, rot.per = 0.15, min.freq = 5, colors = brewer.pal(8, "Dark2"))
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+
+# which words are associated with 'trade'?
+findAssocs(tdm, "trade", 0.2)
+
+# which words are associated with 'interest'?
+findAssocs(tdm, "interest", 0.2)
+
+# which words are associated with 'jobs'?
+findAssocs(tdm, "job", 0.2)
+
+# which words are associated with 'jobs'?
+findAssocs(tdm, "will", 0.2)
+
+
+```
+
+
+
+```{r, eval=FALSE, echo=FALSE}
+#visualizing the association (dont think we need it but if we want to show something fancy we can try)
+plot(tdm, term = freq_terms, corThreshold = 0.35, weighting = T)
+
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+
+dtm <- as.DocumentTermMatrix(tdm)
+lda <- LDA(dtm, k, method = "Gibbs", control = list(nstart=nstart))
+term <- terms(lda, 10)
+term <- apply(term, MARGIN = 2, paste, collapse = ", ")
+
+
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+# tdm is 100% sparse - remove sparse terms
+
+sparse_tdm <- removeSparseTerms(tdm, sparse = 0.95) #95% - i will add more write up on this
+sparse_matrix <- as.matrix(sparse_tdm)
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+#cluster terms
+
+clust_matrix <- dist(scale(sparse_matrix))
+fit <- hclust(clust_matrix, method = "ward.D")
+plot(fit)
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+
+# cut tree into 10 clusters
+rect.hclust(fit, k=5)
+(groups <- cutree(fit, k=10))
+
+```
+
+ITERATION 1
+```{r, eval=FALSE, echo=FALSE}
+# Load stock data files and Tweets from Trump 
+# Step 1 of the process flow described above. 
+snp_raw <- read.csv("sandp.csv", header = TRUE)
+typeof(snp_raw)
+snp_raw[2,]
+tweets_raw <- read.csv("trumptweets.csv", header = TRUE)
+typeof(tweets_raw)
+tweets_raw[19:20,]
+stop_words <- read.csv("stopwords.csv", header=TRUE)
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+#later take off the limit head 
+tweets_sel <- tweets_raw %>% select(id_str, text) %>% head(20)
+typeof(tweets_sel)              
+tweets_sel
+
+# pre-processing
+tweets_sel$text <- sub("RT.*:", "", tweets_sel$text)
+tweets_sel$text <- sub("@.* ", "", tweets_sel$text)
+tweets_sel
+text_cleaning_tokens <- tweets_sel %>% 
+  tidytext::unnest_tokens(word, text)
+text_cleaning_tokens$word <- gsub('[[:digit:]]+', '', text_cleaning_tokens$word)
+text_cleaning_tokens$word <- gsub('[[:punct:]]+', '', text_cleaning_tokens$word)
+# adding csvs for checking can be removed later - JR
+write.csv(text_cleaning_tokens,"~/Documents/CUNY/Data607/fproject/Twitter/wordtoken.csv", row.names = FALSE)
+# stop_words needs to be further added to also can remove the below two CSV files. 
+# using CSV files to check if stop_words is removing from the word tokens
+text_cleaning_tokens <- text_cleaning_tokens %>% filter(!(nchar(word) == 1))%>% 
+  anti_join(stop_words)
+write.csv(text_cleaning_tokens,"~/Documents/CUNY/Data607/fproject/Twitter/wordtokenstopwords.csv", row.names = FALSE)
+tokens <- text_cleaning_tokens %>% filter(!(word==""))
+tokens <- tokens %>% mutate(ind = row_number())
+tokens <- tokens %>% group_by(id_str) %>% mutate(ind = row_number()) %>%
+  tidyr::spread(key = ind, value = word)
+tokens [is.na(tokens)] <- ""
+tokens <- tidyr::unite(tokens, text,-id_str,sep =" " )
+tokens$text <- trimws(tokens$text)
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+#create DTM
+dtm <- CreateDtm(tokens$text, 
+                 doc_names = tokens$id_str, 
+                 ngram_window = c(1, 2))
+#explore the basic frequency
+tf <- TermDocFreq(dtm = dtm)
+original_tf <- tf %>% select(term, term_freq,doc_freq)
+rownames(original_tf) <- 1:nrow(original_tf)
+# Eliminate words appearing less than 2 times or in more than half of the
+# documents
+vocabulary <- tf$term[ tf$term_freq > 1 & tf$doc_freq < nrow(dtm) / 2 ]
+dtm = dtm
+dtm
+```
+
+
+## References
+
+- Sagar, C. (2018, March 22). Twitter Sentiment Analysis Using R. Dataaspirant. Retrieved from https://dataaspirant.com/2018/03/22/twitter-sentiment-analysis-using-r/
+
+- Silge, J., &  Robinson, D. (2019, November 24). Topic Modeling. Text Mining with R. Retrieved from https://www.tidytextmining.com/topicmodeling.html
+
+- Cochrane, N. (2019, September 5). Trump, Tweets, and Trade. Medium. Retrieved from https://towardsdatascience.com/trump-tweets-and-trade-96ac157ef082
+
+- Doll, T. (2018, June 24). LDA Topic Modeling: An Explanation. Medium. Retrieved from https://towardsdatascience.com/lda-topic-modeling-an-explanation-e184c90aadcd
+
+- Brown, B. (n.d.). Trump Twitter Archive. Retrieved from http://www.trumptwitterarchive.com/archive
+
